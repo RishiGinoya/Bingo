@@ -1,0 +1,44 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="row justify-content-center mt-5">
+    <div class="col-12 col-md-6 text-center">
+        <h1 class="mb-4">🎉 Bingo Party</h1>
+
+        {% if error %}
+        <div class="alert alert-danger">{{ error }}</div>
+        {% endif %}
+
+        <div class="card shadow-sm mb-4">
+            <div class="card-body">
+                <h5 class="card-title text-muted">Join a Friend</h5>
+                <form action="{% url 'join_room' %}" method="POST">
+                    {% csrf_token %}
+                    <div class="mb-3">
+                        <input type="text" name="name" class="form-control" placeholder="Your Name" required>
+                    </div>
+                    <div class="mb-3">
+                        <input type="text" name="room_code" class="form-control" placeholder="Room Code" required>
+                    </div>
+                    <button type="submit" class="btn btn-primary w-100">Join Room</button>
+                </form>
+            </div>
+        </div>
+
+        <div class="text-muted mb-3">- OR -</div>
+
+        <div class="card shadow-sm border-success">
+            <div class="card-body">
+                <h5 class="card-title text-success">Start a New Game</h5>
+                <form action="{% url 'create_room' %}" method="POST">
+                    {% csrf_token %}
+                    <div class="mb-3">
+                        <input type="text" name="name" class="form-control" placeholder="Your Name" required>
+                    </div>
+                    <button type="submit" class="btn btn-success w-100">Create New Room</button>
+                </form>
+            </div>
+        </div>
+
+    </div>
+</div>
+{% endblock %}

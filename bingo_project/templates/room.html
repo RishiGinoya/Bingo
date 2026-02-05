@@ -1,0 +1,721 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="text-center">
+    <!-- Room Info -->
+    <div class="mb-3">
+        <h5>
+            Room: <span class="badge bg-secondary">{{ room_code }}</span> | 
+            <span id="player-name">{{ user_name }}</span>
+            {% if is_host %}<span class="badge bg-success">HOST</span>{% endif %}
+        </h5>
+    </div>
+
+    <!-- Players List -->
+    <div class="card mb-3">
+        <div class="card-header">
+            <strong>Players in Room (<span id="player-count">0</span>)</strong>
+        </div>
+        <div class="card-body">
+            <div id="players-list" class="d-flex flex-wrap gap-2 justify-content-center">
+                <!-- Players will be added here dynamically -->
+            </div>
+        </div>
+    </div>
+
+    <!-- Game Status -->
+    <div id="game-status" class="alert alert-info mb-3">
+        {% if is_host %}
+            Waiting for you to start the game...
+        {% else %}
+            Waiting for host to start the game...
+        {% endif %}
+    </div>
+
+    <!-- Current Number Display -->
+    <div class="my-3 p-3 bg-white rounded shadow-sm">
+        <small class="text-muted">Last Called Number</small>
+        <div id="current-number" class="last-called">-</div>
+    </div>
+
+    <!-- Drawn Numbers Display -->
+    <div class="mb-3">
+        <small class="text-muted">Called Numbers:</small>
+        <div id="drawn-numbers" class="d-flex flex-wrap gap-1 justify-content-center mt-2">
+            <!-- Drawn numbers will appear here -->
+        </div>
+    </div>
+
+    <!-- Bingo Board -->
+    <div class="mb-3">
+        <h6 class="text-center text-muted mb-2">Indian Bingo (1-25)</h6>
+        
+        <!-- Board Setup Buttons (shown before game starts) -->
+        <div id="board-setup-controls" class="d-grid gap-2 mb-3">
+            <button id="random-btn" class="btn btn-primary">🎲 Generate Random Numbers</button>
+            <button id="manual-btn" class="btn btn-info">✋ Fill Manually (Click cells 1-25)</button>
+        </div>
+        
+        <div id="bingo-board" class="bingo-board"></div>
+    </div>
+
+    <!-- Action Buttons -->
+    <div class="d-grid gap-2">
+        <button id="ready-btn" class="btn btn-primary btn-lg" disabled>✓ Ready to Play</button>
+        {% if is_host %}
+        <button id="start-btn" class="btn btn-success btn-lg" disabled>🎮 Start Game</button>
+        {% endif %}
+        <button id="bingo-btn" class="btn btn-warning btn-lg" disabled>🏆 BINGO!</button>
+    </div>
+</div>
+
+<script>
+    const roomCode = "{{ room_code }}";
+    const userName = "{{ user_name }}";
+    const isHost = {{ is_host|yesno:"true,false" }};
+    
+    let socket;
+    let reconnectAttempts = 0;
+    const maxReconnectAttempts = 5;
+    let reconnectTimeout;
+    
+    const boardDiv = document.getElementById('bingo-board');
+    const currentNumDiv = document.getElementById('current-number');
+    const drawnNumbersDiv = document.getElementById('drawn-numbers');
+    const playersListDiv = document.getElementById('players-list');
+    const playerCountSpan = document.getElementById('player-count');
+    const gameStatusDiv = document.getElementById('game-status');
+    const startBtn = document.getElementById('start-btn');
+    const bingoBtn = document.getElementById('bingo-btn');
+    const readyBtn = document.getElementById('ready-btn');
+    const randomBtn = document.getElementById('random-btn');
+    const manualBtn = document.getElementById('manual-btn');
+    const boardSetupControls = document.getElementById('board-setup-controls');
+    
+    let myBoard = [];
+    let gameStarted = false;
+    let drawnNumbers = [];
+    let hasSelectedThisRound = false;
+    let pendingSelection = false;
+    let currentTurnPlayer = '';
+    let manualFillMode = false;
+    let boardFilled = false;
+    let isReady = false;
+
+    function connectWebSocket() {
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        socket = new WebSocket(`${protocol}//${window.location.host}/ws/game/${roomCode}/`);
+
+        socket.onopen = function(e) {
+            console.log('✅ WebSocket connected successfully');
+            reconnectAttempts = 0;
+            updateGameStatus('Connected to game server', 'success');
+        };
+
+        socket.onmessage = function(e) {
+            const data = JSON.parse(e.data);
+            console.log('Received:', data);
+
+            if (data.type === 'game_init') {
+                myBoard = data.board;
+                
+                // Check if board is filled
+                if (myBoard && myBoard.length === 25 && myBoard.every(n => n > 0)) {
+                    boardFilled = true;
+                    boardSetupControls.style.display = 'none';
+                } else {
+                    boardFilled = false;
+                    myBoard = [];  // Start with empty board
+                    boardSetupControls.style.display = 'block';
+                }
+                
+                renderBoard(myBoard);
+
+                if (data.room_data) {
+                    updatePlayersList(data.room_data.players);
+                    drawnNumbers = data.room_data.drawn_numbers || [];
+                    updateDrawnNumbers();
+
+                    if (data.room_data.current_number) {
+                        currentNumDiv.innerText = data.room_data.current_number;
+                        autoMarkNumber(data.room_data.current_number);
+                    }
+
+                    if (data.room_data.game_started) {
+                        gameStarted = true;
+                        hasSelectedThisRound = false;
+                        pendingSelection = false;
+                        currentTurnPlayer = data.room_data.current_turn_player || '';
+                        boardSetupControls.style.display = 'none';
+                        if (readyBtn) readyBtn.style.display = 'none';
+                        
+                        // Enable board only if it's my turn
+                        if (currentTurnPlayer === userName) {
+                            enableBoard();
+                            updateGameStatus(`Your turn! Select a number.`, 'success');
+                        } else {
+                            disableBoard();
+                            updateGameStatus(`Waiting for ${currentTurnPlayer}'s turn...`, 'info');
+                        }
+                        
+                        // BINGO button stays disabled until 5 lines complete
+                        updateLineCount();
+                    } else {
+                        updateGameStatus('Fill your board to start the game', 'info');
+                        updateReadyButtonState();
+                    }
+                }
+            }
+        else if (data.type === 'player_joined') {
+            showNotification(`${data.player_name} joined the room!`, 'info');
+            // In a real app, you'd request updated player list
+        }
+        else if (data.type === 'game_started') {
+            gameStarted = true;
+            hasSelectedThisRound = false;
+            pendingSelection = false;
+            currentTurnPlayer = data.current_turn_player || '';
+            
+            // Hide board setup controls
+            boardSetupControls.style.display = 'none';
+            manualFillMode = false;
+            if (readyBtn) readyBtn.style.display = 'none';
+            
+            // Enable board only if it's my turn
+            if (currentTurnPlayer === userName) {
+                enableBoard();
+                updateGameStatus(`Your turn! Select a number.`, 'success');
+            } else {
+                disableBoard();
+                updateGameStatus(`${currentTurnPlayer}'s turn - waiting...`, 'info');
+            }
+            
+            if (isHost && startBtn) startBtn.style.display = 'none';
+            // BINGO button stays disabled until 5 lines complete
+        }
+        else if (data.type === 'number_called') {
+            currentNumDiv.innerText = data.number;
+            const selectedBy = data.selected_by || 'Someone';
+            showNotification(`${selectedBy} selected ${data.number}`, 'info');
+            drawnNumbers = data.drawn_numbers;
+            updateDrawnNumbers();
+            autoMarkNumber(data.number);
+
+            // Update current turn
+            currentTurnPlayer = data.current_turn_player || '';
+            pendingSelection = false;
+            
+            // Enable/disable board based on whose turn it is
+            if (currentTurnPlayer === userName) {
+                enableBoard();
+                updateGameStatus(`Your turn! Select a number.`, 'success');
+            } else {
+                disableBoard();
+                updateGameStatus(`${currentTurnPlayer}'s turn - wait for them to select`, 'warning');
+            }
+            
+            // Vibration and sound effect
+            if (navigator.vibrate) navigator.vibrate(200);
+            playSound();
+        }
+        else if (data.type === 'bingo_winner') {
+            showNotification(`🎉 ${data.winner} got BINGO! 🎉`, 'success');
+            updateGameStatus(`Winner: ${data.winner}! Game will end shortly.`, 'warning');
+            
+            // Disable board and buttons
+            disableBoard();
+            if (bingoBtn) bingoBtn.disabled = true;
+        }
+        else if (data.type === 'invalid_bingo') {
+            showNotification(data.message, 'danger');
+        }
+        else if (data.type === 'error') {
+            showNotification(data.message, 'danger');
+
+            // If selection was rejected, reset pending state
+            if (pendingSelection) {
+                pendingSelection = false;
+                // Re-enable only if it's still my turn
+                if (currentTurnPlayer === userName) {
+                    enableBoard();
+                    updateGameStatus('Your turn! Pick another number.', 'info');
+                } else {
+                    disableBoard();
+                    updateGameStatus(`${currentTurnPlayer}'s turn`, 'warning');
+                }
+            }
+        }
+        else if (data.type === 'board_generated') {
+            myBoard = data.board;
+            boardFilled = true;
+            manualFillMode = false;
+            renderBoard(myBoard);
+            randomBtn.innerText = '🗑️ Clear Grid';
+            randomBtn.className = 'btn btn-danger';
+            manualBtn.disabled = true;
+            updateReadyButtonState();
+            showNotification('Board generated! Click "Ready" when you want to play.', 'success');
+        }
+        else if (data.type === 'board_cleared') {
+            myBoard = [];
+            boardFilled = false;
+            manualFillMode = false;
+            isReady = false;
+            renderBoard(myBoard);
+            randomBtn.innerText = '🎲 Generate Random Numbers';
+            randomBtn.className = 'btn btn-primary';
+            manualBtn.disabled = false;
+            updateReadyButtonState();
+            showNotification('Board cleared! Fill it again to play.', 'info');
+        }
+        else if (data.type === 'cell_filled') {
+            myBoard = data.board;
+            renderBoard(myBoard);
+            
+            // Check if board is complete
+            const filledCount = myBoard.filter(n => n > 0).length;
+            if (filledCount === 25) {
+                boardFilled = true;
+                manualFillMode = false;
+                manualBtn.innerText = '✋ Fill Manually (Click cells 1-25)';
+                manualBtn.className = 'btn btn-info';
+                randomBtn.disabled = false;
+                updateReadyButtonState();
+                showNotification('Board complete! Click "Ready" when you want to play.', 'success');
+            } else {
+                showNotification(`Cell filled with ${data.number}. ${25 - filledCount} remaining.`, 'info');
+            }
+        }
+        else if (data.type === 'player_ready_update') {
+            showNotification(`${data.player_name} is ready!`, 'info');
+            updatePlayersList(data.ready_status);
+            updateStartButtonState(data.ready_status);
+        }
+        else if (data.type === 'room_closing') {
+            updateGameStatus('Game completed! Room is closing...', 'danger');
+            showNotification(data.message, 'warning');
+            
+            // Disable everything
+            disableBoard();
+            if (bingoBtn) bingoBtn.disabled = true;
+            if (readyBtn) readyBtn.disabled = true;
+            if (startBtn) startBtn.disabled = true;
+            
+            // Redirect to home page after 5 seconds
+            setTimeout(() => {
+                window.location.href = '/';
+            }, 5000);
+        }
+        else if (data.type === 'chat') {
+            console.log(`${data.sender}: ${data.message}`);
+        }
+    };
+
+    socket.onerror = function(error) {
+        console.error('❌ WebSocket error:', error);
+        updateGameStatus('Connection error - attempting to reconnect...', 'warning');
+    };
+
+    socket.onclose = function(e) {
+        console.log('🔌 WebSocket closed with code:', e.code);
+        
+        if (e.code === 4000) {
+            updateGameStatus('Session expired. Please refresh the page.', 'danger');
+            showNotification('Session expired. Please refresh and rejoin.', 'danger');
+        } else if (e.code === 4001) {
+            updateGameStatus('Failed to join room. Please try again.', 'danger');
+            showNotification('Failed to join room.', 'danger');
+        } else if (reconnectAttempts < maxReconnectAttempts) {
+            reconnectAttempts++;
+            const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 10000);
+            updateGameStatus(`Disconnected. Reconnecting in ${delay/1000}s... (${reconnectAttempts}/${maxReconnectAttempts})`, 'warning');
+            
+            reconnectTimeout = setTimeout(() => {
+                console.log(`Attempting reconnect ${reconnectAttempts}/${maxReconnectAttempts}...`);
+                connectWebSocket();
+            }, delay);
+        } else {
+            updateGameStatus('Connection lost. Please refresh the page.', 'danger');
+            showNotification('Connection lost. Please refresh the page to rejoin.', 'danger');
+        }
+    };
+    }
+    // Initialize connection
+    connectWebSocket();
+
+
+    function renderBoard(numbers) {
+        boardDiv.innerHTML = '';
+        
+        // If empty board, create 25 empty cells
+        if (!numbers || numbers.length === 0) {
+            for (let idx = 0; idx < 25; idx++) {
+                const cell = document.createElement('div');
+                cell.className = 'bingo-cell empty-cell';
+                cell.innerText = '';
+                cell.dataset.index = idx;
+                
+                cell.onclick = function() {
+                    if (gameStarted) return;
+                    
+                    if (manualFillMode) {
+                        // Manual fill mode - send request to fill this cell
+                        socket.send(JSON.stringify({
+                            'action': 'manual_fill_cell',
+                            'cell_index': idx
+                        }));
+                    } else {
+                        showNotification('Choose "Fill Manually" mode first!', 'warning');
+                    }
+                };
+                
+                boardDiv.appendChild(cell);
+            }
+            return;
+        }
+        
+        // Render filled board
+        numbers.forEach((num, idx) => {
+            const cell = document.createElement('div');
+            cell.className = num > 0 ? 'bingo-cell' : 'bingo-cell empty-cell';
+            cell.innerText = num > 0 ? num : '';
+            cell.dataset.number = num;
+            cell.dataset.index = idx;
+            
+            cell.onclick = function() {
+                if (!gameStarted) {
+                    // Before game: allow manual filling
+                    if (manualFillMode && num <= 0) {
+                        socket.send(JSON.stringify({
+                            'action': 'manual_fill_cell',
+                            'cell_index': idx
+                        }));
+                    }
+                    return;
+                }
+                
+                // During game: number selection
+                if (currentTurnPlayer !== userName) {
+                    showNotification(`It's ${currentTurnPlayer}'s turn!`, 'warning');
+                    return;
+                }
+                
+                if (pendingSelection) {
+                    showNotification('Please wait, submitting your selection...', 'warning');
+                    return;
+                }
+                
+                // If already marked, don't allow unmark
+                if (this.classList.contains('marked')) {
+                    showNotification('Number already selected!', 'warning');
+                    return;
+                }
+                
+                // Check if this number was already called
+                const numValue = parseInt(this.dataset.number);
+                if (drawnNumbers.includes(numValue)) {
+                    showNotification('This number was already selected by someone else!', 'warning');
+                    return;
+                }
+                
+                // Select this number and broadcast to all players
+                pendingSelection = true;
+                disableBoard();
+                updateGameStatus('Submitting your selection...', 'warning');
+                socket.send(JSON.stringify({
+                    'action': 'select_number',
+                    'number': numValue
+                }));
+            };
+            
+            boardDiv.appendChild(cell);
+        });
+    }
+
+    function autoMarkNumber(number) {
+        const cells = boardDiv.querySelectorAll('.bingo-cell');
+        cells.forEach(cell => {
+            if (parseInt(cell.dataset.number) === number) {
+                cell.classList.add('marked');
+            }
+        });
+        updateLineCount();
+    }
+    
+    function updateLineCount() {
+        const cells = boardDiv.querySelectorAll('.bingo-cell');
+        const marked = [];
+        cells.forEach((cell, idx) => {
+            if (cell.classList.contains('marked')) {
+                marked.push(idx);
+            }
+        });
+        
+        const lineCount = countCompleteLines(marked);
+        const statusMsg = gameStarted ? 
+            `${lineCount}/5 lines complete ${lineCount >= 5 ? '- Ready to claim BINGO!' : ''}` : 
+            'Waiting for game to start...';
+        
+        // Enable BINGO button only when 5 lines are complete
+        if (lineCount >= 5) {
+            updateGameStatus(statusMsg, 'success');
+            if (bingoBtn && gameStarted) bingoBtn.disabled = false;
+        } else if (gameStarted) {
+            updateGameStatus(statusMsg, 'info');
+            if (bingoBtn) bingoBtn.disabled = true;
+        }
+    }
+    
+    function countCompleteLines(marked) {
+        if (marked.length < 5) return 0;
+        
+        const markedSet = new Set(marked);
+        let lines = 0;
+        
+        // Check rows
+        for (let row = 0; row < 5; row++) {
+            const rowIndices = [];
+            for (let i = 0; i < 5; i++) {
+                rowIndices.push(row * 5 + i);
+            }
+            if (rowIndices.every(idx => markedSet.has(idx))) {
+                lines++;
+            }
+        }
+        
+        // Check columns
+        for (let col = 0; col < 5; col++) {
+            const colIndices = [];
+            for (let i = 0; i < 5; i++) {
+                colIndices.push(col + i * 5);
+            }
+            if (colIndices.every(idx => markedSet.has(idx))) {
+                lines++;
+            }
+        }
+        
+        // Check diagonals
+        const diag1 = [0, 6, 12, 18, 24];
+        const diag2 = [4, 8, 12, 16, 20];
+        
+        if (diag1.every(idx => markedSet.has(idx))) lines++;
+        if (diag2.every(idx => markedSet.has(idx))) lines++;
+        
+        return lines;
+    }
+
+    function updateDrawnNumbers() {
+        drawnNumbersDiv.innerHTML = '';
+        drawnNumbers.forEach(num => {
+            const badge = document.createElement('span');
+            badge.className = 'badge bg-secondary';
+            badge.innerText = num;
+            drawnNumbersDiv.appendChild(badge);
+        });
+    }
+
+    function updatePlayersList(players) {
+        playersListDiv.innerHTML = '';
+        playerCountSpan.innerText = players.length;
+        
+        players.forEach(player => {
+            const badge = document.createElement('span');
+            if (player.is_ready) {
+                badge.className = 'badge bg-success';
+                badge.innerText = player.name + (player.is_host ? ' 👑' : '') + ' ✓';
+            } else if (player.is_connected) {
+                badge.className = 'badge bg-warning text-dark';
+                badge.innerText = player.name + (player.is_host ? ' 👑' : '');
+            } else {
+                badge.className = 'badge bg-secondary';
+                badge.innerText = player.name + (player.is_host ? ' 👑' : '');
+            }
+            playersListDiv.appendChild(badge);
+        });
+    }
+    
+    function updateReadyButtonState() {
+        if (!readyBtn || gameStarted) return;
+        
+        if (boardFilled && !isReady) {
+            readyBtn.disabled = false;
+            readyBtn.className = 'btn btn-primary btn-lg';
+        } else if (isReady) {
+            readyBtn.disabled = true;
+            readyBtn.className = 'btn btn-success btn-lg';
+            readyBtn.innerText = '✓ Ready!';
+        } else {
+            readyBtn.disabled = true;
+            readyBtn.className = 'btn btn-secondary btn-lg';
+        }
+    }
+    
+    function updateStartButtonState(players) {
+        if (!startBtn || !isHost || gameStarted) return;
+        
+        // Enable start button only if all players are ready
+        const allReady = players.every(p => p.is_ready);
+        startBtn.disabled = !allReady;
+    }
+
+    function updateGameStatus(message, type) {
+        gameStatusDiv.className = `alert alert-${type} mb-3`;
+        gameStatusDiv.innerText = message;
+    }
+
+    function showNotification(message, type) {
+        const notification = document.createElement('div');
+        notification.className = `alert alert-${type} alert-dismissible fade show position-fixed top-0 start-50 translate-middle-x mt-3`;
+        notification.style.zIndex = '9999';
+        notification.innerHTML = `
+            ${message}
+            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+        `;
+        document.body.appendChild(notification);
+        
+        setTimeout(() => {
+            notification.remove();
+        }, 5000);
+    }
+
+    function disableBoard() {
+        const cells = boardDiv.querySelectorAll('.bingo-cell');
+        cells.forEach(cell => {
+            if (!cell.classList.contains('marked')) {
+                cell.style.pointerEvents = 'none';
+                cell.style.opacity = '0.5';
+            }
+        });
+    }
+
+    function enableBoard() {
+        const cells = boardDiv.querySelectorAll('.bingo-cell');
+        cells.forEach(cell => {
+            if (!cell.classList.contains('marked')) {
+                cell.style.pointerEvents = 'auto';
+                cell.style.opacity = '1';
+            }
+        });
+    }
+
+    function playSound() {
+        // Simple beep sound using Web Audio API
+        const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        const oscillator = audioContext.createOscillator();
+        const gainNode = audioContext.createGain();
+        
+        oscillator.connect(gainNode);
+        gainNode.connect(audioContext.destination);
+        
+        oscillator.frequency.value = 800;
+        oscillator.type = 'sine';
+        
+        gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
+        gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.2);
+        
+        oscillator.start(audioContext.currentTime);
+        oscillator.stop(audioContext.currentTime + 0.2);
+    }
+
+    // Button event listeners
+    if (readyBtn) {
+        readyBtn.onclick = function() {
+            if (!boardFilled) {
+                showNotification('Please fill your board first!', 'warning');
+                return;
+            }
+            if (isReady) {
+                showNotification('You are already ready!', 'info');
+                return;
+            }
+            
+            // Mark as ready
+            isReady = true;
+            socket.send(JSON.stringify({'action': 'player_ready'}));
+            this.disabled = true;
+            this.className = 'btn btn-success btn-lg';
+            this.innerText = '✓ Ready!';
+        };
+    }
+    
+    if (randomBtn) {
+        randomBtn.onclick = function() {
+            if (gameStarted) {
+                showNotification('Cannot modify board during game!', 'danger');
+                return;
+            }
+            
+            if (boardFilled) {
+                // Clear the board
+                socket.send(JSON.stringify({'action': 'clear_board'}));
+            } else {
+                // Generate random board
+                socket.send(JSON.stringify({'action': 'generate_random_board'}));
+            }
+        };
+    }
+    
+    if (manualBtn) {
+        manualBtn.onclick = function() {
+            if (gameStarted) {
+                showNotification('Cannot modify board during game!', 'danger');
+                return;
+            }
+            
+            if (!manualFillMode) {
+                // Enable manual fill mode
+                manualFillMode = true;
+                manualBtn.innerText = '🗑️ Cancel Manual Fill';
+                manualBtn.className = 'btn btn-warning';
+                randomBtn.disabled = true;
+                
+                // Clear board if needed
+                if (myBoard.length === 0 || !myBoard.every(n => n > 0)) {
+                    myBoard = Array(25).fill(0);
+                    renderBoard(myBoard);
+                }
+                
+                showNotification('Click on cells to fill them sequentially (1-25)', 'info');
+            } else {
+                // Disable manual fill mode
+                manualFillMode = false;
+                manualBtn.innerText = '✋ Fill Manually (Click cells 1-25)';
+                manualBtn.className = 'btn btn-info';
+                randomBtn.disabled = false;
+                showNotification('Manual fill mode cancelled', 'info');
+            }
+        };
+    }
+    
+    if (startBtn) {
+        startBtn.onclick = function() {
+            socket.send(JSON.stringify({'action': 'start_game'}));
+            this.disabled = true;
+        };
+    }
+
+    if (bingoBtn) {
+        bingoBtn.onclick = function() {
+            if (!gameStarted) {
+                showNotification('Game has not started yet!', 'warning');
+                return;
+            }
+            
+            // Collect board state
+            const cells = boardDiv.querySelectorAll('.bingo-cell');
+            const boardState = [];
+            
+            cells.forEach(cell => {
+                boardState.push({
+                    number: parseInt(cell.dataset.number),
+                    marked: cell.classList.contains('marked')
+                });
+            });
+            
+            socket.send(JSON.stringify({
+                'action': 'claim_bingo',
+                'board_state': boardState
+            }));
+        };
+    }
+</script>
+{% endblock %}
