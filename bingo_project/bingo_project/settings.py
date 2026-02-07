@@ -30,14 +30,21 @@ DEBUG = config('DEBUG', default=True, cast=bool)
 
 ALLOWED_HOSTS = config('ALLOWED_HOSTS', default='localhost,127.0.0.1', cast=Csv())
 
-# Add CSRF trusted origins for production
-# Automatically add https:// prefix to ALLOWED_HOSTS for CSRF
-csrf_origins = config('CSRF_TRUSTED_ORIGINS', default='', cast=Csv())
-if not csrf_origins and ALLOWED_HOSTS:
+# CSRF Settings for production
+CSRF_TRUSTED_ORIGINS = config('CSRF_TRUSTED_ORIGINS', default='', cast=Csv())
+if not CSRF_TRUSTED_ORIGINS and ALLOWED_HOSTS:
     # Auto-generate CSRF trusted origins from ALLOWED_HOSTS
     CSRF_TRUSTED_ORIGINS = [f'https://{host}' for host in ALLOWED_HOSTS if host not in ['localhost', '127.0.0.1']]
+
+# Security settings for production
+if not DEBUG:
+    CSRF_COOKIE_SECURE = True
+    SESSION_COOKIE_SECURE = True
+    SECURE_SSL_REDIRECT = False  # Render handles SSL
+    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 else:
-    CSRF_TRUSTED_ORIGINS = csrf_origins
+    CSRF_COOKIE_SECURE = False
+    SESSION_COOKIE_SECURE = False
 
 
 # Application definition
