@@ -31,10 +31,24 @@ DEBUG = config('DEBUG', default=True, cast=bool)
 ALLOWED_HOSTS = config('ALLOWED_HOSTS', default='localhost,127.0.0.1', cast=Csv())
 
 # CSRF Settings for production
-CSRF_TRUSTED_ORIGINS = config('CSRF_TRUSTED_ORIGINS', default='', cast=Csv())
-if not CSRF_TRUSTED_ORIGINS and ALLOWED_HOSTS:
-    # Auto-generate CSRF trusted origins from ALLOWED_HOSTS
-    CSRF_TRUSTED_ORIGINS = [f'https://{host}' for host in ALLOWED_HOSTS if host not in ['localhost', '127.0.0.1']]
+CSRF_TRUSTED_ORIGINS = []
+
+# Add from environment variable
+csrf_from_env = config('CSRF_TRUSTED_ORIGINS', default='', cast=Csv())
+if csrf_from_env:
+    CSRF_TRUSTED_ORIGINS.extend(csrf_from_env)
+
+# Auto-generate from ALLOWED_HOSTS
+for host in ALLOWED_HOSTS:
+    if host not in ['localhost', '127.0.0.1', '*']:
+        https_origin = f'https://{host}'
+        if https_origin not in CSRF_TRUSTED_ORIGINS:
+            CSRF_TRUSTED_ORIGINS.append(https_origin)
+
+# Fallback: Add Render domain if detected
+render_url = "https://bingo-p3pu.onrender.com"
+if render_url and render_url not in CSRF_TRUSTED_ORIGINS:
+    CSRF_TRUSTED_ORIGINS.append(render_url)
 
 # Security settings for production
 if not DEBUG:
